@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <title>Snake WebGL</title>
+    <style>
+        body { 
+            margin: 0; 
+            overflow: hidden; 
+            background-color: #0d0d0d; 
+        }
+        canvas { 
+            display: block; 
+        }
+        #score-display {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            font-size: 2em;
+            font-family: Arial, sans-serif;
+            text-shadow: 2px 2px 4px #000;
+        }
+
+        /* YENİ: Hızlanma Enerji Barı Stilleri */
+        #boost-container {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 300px;
+            height: 20px;
+            background-color: rgba(0, 0, 0, 0.5);
+            border: 2px solid #fff;
+            border-radius: 10px;
+            padding: 2px;
+        }
+        #boost-bar {
+            width: 100%;
+            height: 100%;
+            background-color: #f1c40f; /* Sarı renk */
+            border-radius: 8px;
+            transition: width 0.1s linear; /* Genişlik değişimini yumuşatır */
+        }
+    </style>
+</head>
+<body>
+    <div id="score-display">Skor: <span id="score">0</span></div>
+
+    <div id="boost-container">
+        <div id="boost-bar"></div>
+    </div>
+
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.165.0/build/three.module.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- ARAYÜZ ELEMENTLERİ ---
+        const scoreElement = document.getElementById('score');
+        const boostBar = document.getElementById('boost-bar'); // Enerji barı referansı
+        
+        // --- 3D SAHNE AYARLARI ---
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x0d0d0d, 0.015);
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        let score = 0;
+
+        // --- IŞIKLAR ---
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambientLight);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
+        dirLight.position.set(5, 10, 7);
+        dirLight.castShadow = true;
+        scene.add(dirLight);
+
+        // --- FARE KONTROLÜ ---
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+        const targetPoint = new THREE.Vector3();
+
+        // --- OYUN NESNELERİ ---
+        const snake = [];
+        let baseSpeed = 5; // Yılanın normal hızı
+        const segmentSpacing = 0.8;
+
+        // YENİ: Hızlanma Yeteneği Değişkenleri
+        let isBoosting = false;
+        let boostEnergy = 100;
+        const maxBoostEnergy = 100;
+        const boostMultiplier = 2.0; // Normal hızın 2 katı
+        const boostDepletionRate = 35; // Saniyede tükenen enerji
+        const boostRegenRate = 10; // Saniyede yenilenen enerji
+
+        const headMaterial = new THREE.MeshPhongMaterial({ color: 0x2ecc71, shininess: 80 });
+        const bodyMaterial = new THREE.MeshPhongMaterial({ color: 0x27ae60, shininess: 30 });
+        const foodMaterial = new THREE.MeshPhongMaterial({ color: 0xe74c3c });
+
+        const foods = [];
+        const foodGroup = new THREE.Group();
+        scene.add(foodGroup);
+        const initialFoodCount = 25;
+
+        // --- FONKSİYONLAR ---
+        function gameOver() {
+            alert('Oyun Bitti! Skorunuz: ' + score);
+            location.reload();
+        }
+
+        function createSnakeSegment(material, position) {
+            const geometry = new THREE.SphereGeometry(0.5, 20, 20);
+            const segment = new THREE.Mesh(geometry, material);
+            segment.position.copy(position);
+            segment.castShadow = true;
+            segment.receiveShadow = true;
+            return segment;
+        }
+        
+        function spawnFood(referencePosition) {
+            const foodSpawnRadius = 40;
+            const foodPos = new THREE.Vector3(
+                referencePosition.x + (Math.random() - 0.5) * foodSpawnRadius, 
+                0, 
+                referencePosition.z + (Math.random() - 0.5) * foodSpawnRadius
+            );
+            const geometry = new THREE.IcosahedronGeometry(0.7, 0);
+            const food = new THREE.Mesh(geometry, foodMaterial);
+            food.position.copy(foodPos);
+            food.castShadow = true;
+            foods.push(food);
+            foodGroup.add(food);
+        }
+
+        // --- OYUN BAŞLANGICI ---
+        const head = createSnakeSegment(headMaterial, new THREE.Vector3(0, 0, 0));
+        snake.push(head);
+        scene.add(head);
+
+        for (let i = 0; i < initialFoodCount; i++) {
+            spawnFood(head.position);
+        }
+
+        // --- ANA OYUN DÖNGÜSÜ ---
+        const clock = new THREE.Clock();
+        let direction = new THREE.Vector3(1, 0, 0);
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const deltaTime = clock.getDelta();
+            let currentSpeed = baseSpeed;
+
+            // 1. HIZLANMA MANTIĞI VE ENERJİ YÖNETİMİ
+            if (isBoosting && boostEnergy > 0) {
+                // Hızlanma aktif ve enerji var
+                currentSpeed = baseSpeed * boostMultiplier;
+                boostEnergy -= boostDepletionRate * deltaTime;
+                // Enerji biterse hızlanmayı durdur
+                if (boostEnergy <= 0) {
+                    isBoosting = false;
+                }
+            } else {
+                // Hızlanma aktif değil, enerjiyi yenile
+                if (boostEnergy < maxBoostEnergy) {
+                    boostEnergy += boostRegenRate * deltaTime;
+                }
+            }
+            // Enerjiyi 0-100 arasında ve barı güncelle
+            boostEnergy = Math.max(0, Math.min(maxBoostEnergy, boostEnergy));
+            boostBar.style.width = boostEnergy + '%';
+
+
+            // 2. FAREYE GÖRE YÖNÜ GÜNCELLE
+            raycaster.setFromCamera(mouse, camera);
+            raycaster.ray.intersectPlane(plane, targetPoint);
+
+            if (targetPoint.length() > 0) {
+                const newDirection = targetPoint.clone().sub(head.position);
+                newDirection.y = 0;
+                newDirection.normalize();
+                direction.lerp(newDirection, 0.1);
+            }
+
+            // 3. YILANI HAREKET ETTİR
+            const moveDistance = currentSpeed * deltaTime;
+            head.position.add(direction.clone().multiplyScalar(moveDistance));
+            
+            for (let i = 1; i < snake.length; i++) {
+                const leader = snake[i - 1];
+                const follower = snake[i];   
+                const distance = leader.position.distanceTo(follower.position);
+                if (distance > segmentSpacing) {
+                    const followDirection = follower.position.clone().sub(leader.position).normalize();
+                    follower.position.copy(leader.position).add(followDirection.multiplyScalar(segmentSpacing));
+                }
+            }
+
+            // 4. YEM YEME KONTROLÜ
+            for (let i = foods.length - 1; i >= 0; i--) {
+                const foodItem = foods[i];
+                if (head.position.distanceTo(foodItem.position) < 1.2) {
+                    score++;
+                    scoreElement.textContent = score;
+                    baseSpeed += 0.05; // Normal hızı kalıcı olarak biraz artır
+                    const newSegment = createSnakeSegment(bodyMaterial, snake[snake.length - 1].position);
+                    snake.push(newSegment);
+                    scene.add(newSegment);
+                    foodGroup.remove(foodItem);
+                    foods.splice(i, 1);
+                    spawnFood(head.position);
+                    break;
+                }
+            }
+
+            // 5. KENDİNE ÇARPMA KONTROLÜ
+            for (let i = 4; i < snake.length; i++) {
+                if (head.position.distanceTo(snake[i].position) < 0.5) {
+                    gameOver();
+                    return;
+                }
+            }
+
+            // 6. KAMERAYI GÜNCELLE
+            const cameraOffset = new THREE.Vector3(0, 15, 20);
+            camera.position.lerp(head.position.clone().add(cameraOffset), 0.05);
+            camera.lookAt(head.position);
+            
+            // 7. SAHNEYİ RENDER ET
+            renderer.render(scene, camera);
+        }
+
+        // --- OLAY DİNLEYİCİLERİ ---
+        window.addEventListener('mousemove', (event) => {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = - (event.clientY / window.innerHeight) * 2 + 1;
+        });
+
+        // YENİ: Hızlanmayı başlatmak ve durdurmak için fare tıklama olayları
+        window.addEventListener('mousedown', (event) => {
+            if (event.button === 0) { // Sadece sol tık
+                isBoosting = true;
+            }
+        });
+        window.addEventListener('mouseup', (event) => {
+            if (event.button === 0) { // Sadece sol tık
+                isBoosting = false;
+            }
+        });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }, false);
+        
+        // Oyunu başlat
+        animate(); 
+
+    </script>
+</body>
+</html>
